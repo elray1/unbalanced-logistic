@@ -1,0 +1,168 @@
+---
+title: "unbalanced logistic"
+author: "Evan L. Ray"
+date: "2/12/2021"
+output: html_document
+---
+
+# Introduction
+
+We're interested in a principled way to measure classification accuracy and estimate classification model parameters in the presence of unbalanced data.
+
+# Set up
+
+## Data generating process and Bayes classifier
+
+We generate $n$ observations from a mixture model with three classes:
+
+\begin{align*}
+Y_i &\sim \text{Categorical}(0.9, 0.075, 0.025) \\
+X_i | Y_i = y_i &\sim \text{Normal}(\mu_{y_i}, 1) \\
+\mu_1 &= 0 \\
+\mu_2 &= 2 \\
+\mu_3 &= 4 \\
+\end{align*}
+
+The following plot shows a representation of this data generating process in the top panel; each normal density has been scaled by the corresponding class probability so that $P(Y_i = k, X_i \in [a,b])$ is the area under the curve for group $k$ in the interval from $a$ to $b$. The lower panel shows the class probabilities from the Bayes classifier.
+
+```{r, echo = FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(purrr)
+
+pi <- c(0.9, 0.075, 0.025)
+mu <- c(0, 2, 4)
+sigma_sq <- c(1, 1, 1)
+
+x_grid <- seq(
+  from = min(mu - 3 * sqrt(sigma_sq)),
+  to = max(mu + 3 * sqrt(sigma_sq)),
+  length.out = 201
+)
+
+to_plot <- purrr::map_dfr(
+  seq_along(pi),
+  function(k) {
+    data.frame(
+      k = k,
+      x = x_grid,
+      scaled_density = pi[k] * dnorm(x_grid, mean = mu[k], sd = sqrt(sigma_sq[k]))
+    )
+  }
+) %>%
+  dplyr::group_by(x) %>%
+  dplyr::mutate(
+    bayes_prob = scaled_density / sum(scaled_density)
+  ) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_longer(
+    cols = c("scaled_density", "bayes_prob"),
+    names_to = "quantity",
+    values_to = "value") %>%
+  dplyr::mutate(
+    quantity = factor(quantity, levels = c("scaled_density", "bayes_prob")),
+    k = factor(k)
+  )
+
+ggplot(data = to_plot) +
+  geom_line(mapping = aes(x = x, y = value, color = k, linetype = k)) +
+  theme_bw() +
+  facet_wrap( ~ quantity, ncol = 1, scales = "free_y")
+```
+
+The idea is that class $k = 1$ represents sitting, $k = 2$ represents standing, and $k = 3$ represents stepping.
+
+## Measures of classifier accuracy
+
+We will consider three measures of classifier accuracy:
+
+1. Overall classification accuracy.  We want this to be large.
+1. Average true positive rate: for each class, we calculate the proportion of observations in that class that are classified correctly to get a true positive rate (aka recall or sensitivity) for that class.  We then average these class-specific true positive rates across all classes.  We want this to be large.
+1. Confusion loss.  We posit the ability to specify a numeric "loss" associated with each type of classification error in a confusion matrix.  For concreteness, we use the losses recorded in the table below:
+
+```{r, echo = FALSE}
+losses <- tidyr::expand_grid(
+  k_true = 1:3,
+  k_classified = 1:3
+) %>%
+  dplyr::mutate(
+    loss = dplyr::case_when(
+      k_true == k_classified ~ 0,
+      (k_true == 1 & k_classified == 2) | (k_true == 2 & k_classified == 1) ~ 1,
+      (k_true == 1 & k_classified == 3) | (k_true == 3 & k_classified == 1) ~ 5,
+      (k_true == 2 & k_classified == 3) | (k_true == 3 & k_classified == 2) ~ 3,
+    )
+  )
+
+ggplot(data = losses) +
+  geom_raster(mapping = aes(x = k_true, y = k_classified, fill = loss)) +
+  geom_label(mapping = aes(x = k_true, y = k_classified, label = loss)) +
+  theme_bw()
+```
+
+The idea is that a correct classification incurs no loss, an error confusing sitting and standing incurs a relatively small loss, an error confusing standing and stepping incurs a larger loss, and an error confusing sitting and stepping incurs a still larger loss.  We want our total loss from misclassification to be minimized.
+
+## Classification methods
+
+We consider the Bayes classifier and three variations on multinomial logistic regression varying the objective function used for estimating the model parameters:
+
+#### 1. Maximum likelihood
+
+$\widehat{\beta} = \mathop{argmax}_\beta \sum_{i = 1}^n \log\left[ \widehat{P}(Y_i = y_i | \beta) \right]$
+
+I think this should be optimal in terms of overall classification accuracy.
+
+#### 2. Maximizing a "rebalanced" likelihood similar to that used in the second paper we read
+
+$\widehat{\beta} = \mathop{argmax}_\beta \sum_{i = 1}^n \frac{1}{\widehat{\pi}_{y_i}} \log\left[ \widehat{P}(Y_i = y_i | \beta) \right]$
+
+Here $\widehat{\pi}_{y_i}$ is the training set sample proportion of observations in the same class as observation $i$.  The idea is that if observation $i$ was in a commonly occurring class, we scale down its contribution to the likelihood.  This doesn't seem to be exactly what is written down in the second paper we read, but it is the closest thing I can think of that seems reasonable (I think they weighted by $\widehat{\pi}_{y_i}$ instead of $\frac{1}{\widehat{\pi}_{y_i}}$ but I don't know why).
+
+We hypothesize that this will achieve the best average true positive rate.
+
+#### 3. Minimizing probability-weighted confusion loss
+
+$\widehat{\beta} = \mathop{argmax}_\beta \sum_{i = 1}^n \sum_{k = 1}^3 \ell_{k, y_i} \log\left[ \widehat{P}(Y_i = y_i | \beta) \right]$
+
+Here $\ell_{k, y_i}$ is the loss recorded in row $k$ and column $y_i$ of the loss table above.  I just made this up and I'm not sure this is the right way to do this.
+
+I think this should achieve the best confusion loss.
+
+# Simulation Study
+
+We simulate 1000 data sets, each with 200 training set observations and 10000 test set observations.  For each simulation, we fit the classifiers described above to the training set, obtain predictions for the test set, and calculate the three measures of classification accuracy for the test set predictions.
+
+```{r, echo = FALSE}
+get_predicted_classes_bayes_rule <- function(x, pi, mu, sigma_sq) {
+  purrr::map_dfr(
+    seq_along(pi),
+    function(k) {
+      data.frame(
+        k = k,
+        i = seq_along(x),
+        scaled_density = pi[k] * dnorm(x, mean = mu[k], sd = sqrt(sigma_sq[k]))
+      )
+    }
+  ) %>%
+    dplyr::group_by(i) %>%
+    dplyr::slice_max(scaled_density) %>%
+    dplyr::pull(k)
+}
+
+get_predicted_classes_estimated <- function(x, intercept, beta) {
+  log_class_probs <- cbind(
+    rep(0, length(x)),
+    intercept[1] + beta[1] * x,
+    intercept[2] + beta[2] * x
+  )
+  apply(log_class_probs, 1, which.max)
+}
+
+multinomial_logistic_mle_model <- rstan::stan_model("multinomial_logistic_mle.stan")
+```
+
+
+
+
+
+
