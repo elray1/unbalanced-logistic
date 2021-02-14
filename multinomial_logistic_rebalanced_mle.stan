@@ -4,6 +4,20 @@ data {
   int y[n];
 }
 
+transformed data {
+  real pi_hat[3];
+
+  for(k in 1:3) {
+    pi_hat[k] = 0;
+    for(i in 1:n) {
+      if(y[i] == k) {
+        pi_hat[k] += 1;
+      }
+    }
+    pi_hat[k] = pi_hat[k] / n;
+  }
+}
+
 parameters {
   // beta vector
   real intercept[2];
@@ -12,7 +26,7 @@ parameters {
 
 transformed parameters {
   matrix[n, 3] log_class_probs;
-  
+
   {
     real log_denom;
     for(i in 1:n) {
@@ -29,6 +43,6 @@ transformed parameters {
 
 model {
   for(i in 1:n) {
-    target += log_class_probs[i, y[i]];
+    target += (1 - pi_hat[y[i]]) * log_class_probs[i, y[i]];
   }
 }
